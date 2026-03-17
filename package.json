@@ -1,0 +1,17 @@
+{
+  "name": "scraper-railway",
+  "version": "1.0.0",
+  "description": "API de Scraping do Google Maps usando Puppeteer para Railway",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "puppeteer": "^22.6.0"
+  },
+  "engines": {
+    "node": "20.x"
+  }
+}
