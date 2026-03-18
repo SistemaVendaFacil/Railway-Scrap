@@ -43,24 +43,34 @@ app.post('/scrape', async (req, res) => {
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7' });
 
         // Navega até a URL
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+        console.log("Navegando...");
+        await page.goto(url, { waitUntil: 'load', timeout: 60000 });
 
         // Tenta clicar no botão de "Aceitar tudo" ou "Concordo" se aparecer a tela de cookies
         try {
-            const cookieButtons = await page.$$('button');
-            for (let btn of cookieButtons) {
+            // Aguarda um pouco para ver se a tela de cookies surge
+            await new Promise(r => setTimeout(r, 2000));
+            const buttons = await page.$$('button');
+            for (const btn of buttons) {
                 const text = await page.evaluate(el => el.innerText, btn);
-                if (text.includes('Aceitar tudo') || text.includes('Concordar') || text.includes('Accept all') || text.includes('I agree')) {
+                if (/Aceitar tudo|Concordo|Concordar|Accept all|I agree/i.test(text)) {
+                    console.log("Clicando em Aceitar Cookies...");
                     await btn.click();
-                    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 5000 }).catch(() => {});
+                    await new Promise(r => setTimeout(r, 3000));
                     break;
                 }
             }
         } catch (e) {
-            console.log("Tela de cookies não detectada ou erro ao clicar.");
+            console.log("Sem tela de cookies.");
         }
 
-        console.log("Página carregada, extraindo dados...");
+        // Aguarda o seletor principal do Maps ou do Search
+        await Promise.race([
+            page.waitForSelector('h1', { timeout: 10000 }),
+            page.waitForSelector('[data-attrid="title"]', { timeout: 10000 })
+        ]).catch(() => console.log("Timeout aguardando seletores, tentando extrair assim mesmo..."));
+
+        console.log("Extraindo dados do DOM...");
 
         const dadosExtraidos = await page.evaluate(() => {
             const getTexto = (sel) => {
@@ -68,13 +78,18 @@ app.post('/scrape', async (req, res) => {
                 return el ? el.innerText.trim() : null;
             };
 
-            // 1. Extrair Nome
-            // Tenta seletores do Maps, depois do Search (Knowledge Panel), depois o Title
+            // 1. Extrair Nome - PRIORIDADE MÁXIMA
             let nomeLoja = getTexto('h1.fontHeadlineLarge') || 
                            getTexto('h1') || 
                            getTexto('[data-attrid="title"]') || 
-                           getTexto('div[role="main"] h2') ||
-                           document.title.split(' - ')[0].split(' – ')[0];
+                           getTexto('div[role="main"] h2');
+
+            // Se ainda não tem nome, tenta pegar do título da aba (limpando o sufixo do Google)
+            if (!nomeLoja || nomeLoja.length < 3) {
+                nomeLoja = document.title.replace(/ - Google (Maps|Search|Busca)/i, '')
+                                         .replace(/ – Google (Maps|Search|Busca)/i, '')
+                                         .trim();
+            }
 
             // 2. Extrair Nota e Avaliações
             let nota = null;
@@ -105,7 +120,7 @@ app.post('/scrape', async (req, res) => {
             }
 
             // --- Estrutura GOOGLE SEARCH (Knowledge Panel) ---
-            if (!nota) {
+            if (!nota || isNaN(nota)) {
                 const searchNota = getTexto('span.Aq14f') || getTexto('.TT9eCd');
                 if (searchNota) nota = searchNota.replace(',', '.');
             }
