@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
-const puppeteer = require('puppeteer');
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -17,29 +19,28 @@ app.post('/scrape', async (req, res) => {
 
     let browser = null;
     try {
-        console.log(`Iniciando extração para: ${url}`);
+        console.log(`Iniciando extração stealth para: ${url}`);
         
-        // Configurações críticas para rodar o Puppeteer em ambientes de container (como Railway) sem root
         browser = await puppeteer.launch({
             headless: "new",
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--disable-gpu'
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--shm-size=1gb'
             ],
-            // Se o executável do Chrome que instalamos no Docker estiver no path, o Puppeteer vai usar.
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome'
         });
 
         const page = await browser.newPage();
         
-        // Define um User-Agent real e Idioma fixo para evitar variações de seletores
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        // Simula uma tela real
+        await page.setViewport({ width: 1280, height: 800 });
+
+        // User-Agent de um Chrome moderno no Windows
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
         await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7' });
 
         // Navega até a URL
