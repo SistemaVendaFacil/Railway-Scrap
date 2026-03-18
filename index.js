@@ -38,11 +38,27 @@ app.post('/scrape', async (req, res) => {
 
         const page = await browser.newPage();
         
-        // Define um User-Agent real
+        // Define um User-Agent real e Idioma fixo para evitar variações de seletores
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7' });
 
-        // Navega até a URL aguardando o carregamento da rede parar (pra driblar redirecionamentos)
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
+        // Navega até a URL
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 45000 });
+
+        // Tenta clicar no botão de "Aceitar tudo" ou "Concordo" se aparecer a tela de cookies
+        try {
+            const cookieButtons = await page.$$('button');
+            for (let btn of cookieButtons) {
+                const text = await page.evaluate(el => el.innerText, btn);
+                if (text.includes('Aceitar tudo') || text.includes('Concordar') || text.includes('Accept all') || text.includes('I agree')) {
+                    await btn.click();
+                    await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 5000 }).catch(() => {});
+                    break;
+                }
+            }
+        } catch (e) {
+            console.log("Tela de cookies não detectada ou erro ao clicar.");
+        }
 
         console.log("Página carregada, extraindo dados...");
 
@@ -53,47 +69,66 @@ app.post('/scrape', async (req, res) => {
             };
 
             // 1. Extrair Nome
-            let nome = getTexto('h1.fontHeadlineLarge') || getTexto('h1') || document.title.replace(' - Google Maps', '');
+            // Tenta seletores do Maps, depois do Search (Knowledge Panel), depois o Title
+            let nomeLoja = getTexto('h1.fontHeadlineLarge') || 
+                           getTexto('h1') || 
+                           getTexto('[data-attrid="title"]') || 
+                           getTexto('div[role="main"] h2') ||
+                           document.title.split(' - ')[0].split(' – ')[0];
 
-            // 2. Extrair Nota e Avaliações (Método Visual/DOM primeiro)
+            // 2. Extrair Nota e Avaliações
             let nota = null;
             let avaliacoes = null;
             let categoria = null;
 
-            // Busca a nota em spans de estrelas (ex: "4,8")
+            // --- Estrutura GOOGLE MAPS ---
             const notaEl = document.querySelector('span[aria-hidden="true"]');
             if (notaEl && notaEl.innerText.includes(',')) {
-                nota = notaEl.innerText.replace(',', '.');
+                const possivelNota = notaEl.innerText.replace(',', '.');
+                if (!isNaN(parseFloat(possivelNota))) nota = possivelNota;
             }
 
-            // Busca avaliações (ex: "(1.592)" ou "1.592 avaliações")
-            const avalEl = document.querySelector('button[jsaction="pane.rating.moreReviews"] span') || 
-                           document.querySelector('span[aria-label*="avaliações"]');
+            const avalEl = document.querySelector('button[jsaction*="pane.rating.moreReviews"]') || 
+                           document.querySelector('span[aria-label*="avaliações"]') ||
+                           document.querySelector('span[aria-label*="reviews"]');
+            
             if (avalEl) {
-                avaliacoes = avalEl.innerText.replace(/\D/g, '');
+                const txt = (avalEl.getAttribute('aria-label') || avalEl.innerText).replace(/\D/g, '');
+                if (txt) avaliacoes = txt;
             }
 
-            // 3. Extrair Categoria (Setor)
-            // Geralmente é um botão próximo à nota
             const catEl = document.querySelector('button[jsaction*="category"]') || 
-                           document.querySelector('.DkEaL'); // Classe comum para categoria no Maps
+                           document.querySelector('.DkEaL') ||
+                           document.querySelector('.fontBodyMedium span');
             if (catEl) {
                 categoria = catEl.innerText.trim();
             }
 
-            // 4. Fallback para Texto Puro se a estrutura falhar
-            const textoBody = document.body.innerText;
+            // --- Estrutura GOOGLE SEARCH (Knowledge Panel) ---
+            if (!nota) {
+                const searchNota = getTexto('span.Aq14f') || getTexto('.TT9eCd');
+                if (searchNota) nota = searchNota.replace(',', '.');
+            }
+            if (!avaliacoes) {
+                const searchAval = getTexto('.SJmY2b span') || getTexto('.z1asCe + span');
+                if (searchAval) avaliacoes = searchAval.replace(/\D/g, '');
+            }
+            if (!categoria) {
+                categoria = getTexto('.Y6Y31') || getTexto('.E54Xyc');
+            }
+
+            // 4. Fallback agressivo por Regex se nada acima funcionou
             if (!nota || !avaliacoes) {
-                const regex = /(\d[.,]\d)[^\d]{1,10}?(\d+([.,]\d+)*)[^\d]{1,10}?(avalia|coment)/i;
-                const match = textoBody.match(regex);
-                if (match) {
-                    if (!nota) nota = match[1].replace(',', '.');
-                    if (!avaliacoes) avaliacoes = match[2].replace(/\D/g, '');
-                }
+                const bodyText = document.body.innerText;
+                const matchNota = bodyText.match(/(\d[.,]\d)\s?estrelas/i);
+                if (matchNota && !nota) nota = matchNota[1].replace(',', '.');
+
+                const matchAval = bodyText.match(/([\d.]+)\s?avalia/i);
+                if (matchAval && !avaliacoes) avaliacoes = matchAval[1].replace(/\D/g, '');
             }
 
             return {
-                nome: nome,
+                nome: nomeLoja,
                 nota: nota ? parseFloat(nota) : null,
                 avaliacoes: avaliacoes ? parseInt(avaliacoes, 10) : null,
                 categoria: categoria
