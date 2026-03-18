@@ -75,28 +75,27 @@ app.post('/scrape', async (req, res) => {
                     return el ? el.innerText.trim() : null;
                 };
 
-                // No mobile, os seletores podem mudar um pouco
-                let nome = getTexto('div[role="heading"]') || 
+                // --- SELETORES MOBILE GOOGLE SEARCH ---
+                // Nome: div de heading nível 2 é o mais estável
+                let nome = getTexto('div[role="heading"][aria-level="2"]') || 
                            getTexto('h1') ||
-                           getTexto('[data-attrid="title"]') ||
-                           getTexto('.LrzUbe');
+                           getTexto('[data-attrid="title"]');
 
-                // Evitar nome de sistema
-                if (nome && /acessibilidade|accessibility|google/i.test(nome)) {
-                    nome = null;
-                }
+                // Nota: classe Aq14f é padrão no mobile
+                let nota = getTexto('span.Aq14f') || getTexto('.p_z89_nota');
+                
+                // Avaliações: span hq99nb ou aria-label
+                let avaliacoes = getTexto('span.hq99nb') || 
+                                 getTexto('span[aria-label*="avaliações"]');
+                
+                // Categoria: Bloco de texto após a nota
+                let categoria = getTexto('div.BNeawe.tAd7Pd.AP7Wnd') || 
+                                getTexto('[data-attrid="subtitle"]');
 
-                let nota = null, avaliacoes = null, categoria = null;
-
-                // Seletores Mobile do Google Search
-                const sNota = getTexto('span.Aq14f') || getTexto('.p_z89_nota') || getTexto('.t0271b');
-                if (sNota) nota = sNota.replace(',', '.');
-
-                const sAval = getTexto('span[aria-label*="avaliações"]') || getTexto('.z1asCe + span');
-                if (sAval) avaliacoes = sAval.replace(/\D/g, '');
-
-                const sCat = getTexto('[data-attrid="subtitle"]') || getTexto('.E54Xyc');
-                if (sCat) categoria = sCat;
+                // --- FALLBACKS ---
+                if (nome && /acessibilidade|accessibility|google/i.test(nome)) nome = null;
+                if (nota && nota.includes(',')) nota = nota.replace(',', '.');
+                if (avaliacoes) avaliacoes = avaliacoes.replace(/\D/g, '');
 
                 return {
                     nome: nome,
@@ -109,14 +108,19 @@ app.post('/scrape', async (req, res) => {
 
         const result = await extrair();
         
-        // Se ainda estiver nulo, tenta um último recurso: pegar do título da página
-        if (!result.nome) {
+        // SEGURANÇA FINAL: Se o nome falhou ou veio URL, tenta o título da aba se for limpo
+        if (!result.nome || result.nome.startsWith('http')) {
             const title = await page.title();
-            result.nome = title.replace(/ - Google (Busca|Search|Maps)/i, '').trim();
+            if (title && !title.startsWith('http')) {
+                result.nome = title.replace(/ - Google (Busca|Search|Maps|Pesquisa)/i, '').trim();
+            } else {
+                result.nome = null; // Antes nulo que URL
+            }
         }
 
         console.log("Resultado final (Mobile):", result);
         res.json({ success: true, data: result });
+
 
 
 
