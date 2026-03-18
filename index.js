@@ -91,10 +91,14 @@ app.post('/scrape', async (req, res) => {
                 };
 
                 // 1. Extrair Nome
-                let nomeExtraido = getTexto('h1.fontHeadlineLarge') || 
-                                   getTexto('h1') || 
-                                   getTexto('[data-attrid="title"]') || 
-                                   getTexto('div[role="main"] h2');
+                let nomeExtraido = getTexto('[data-attrid="title"]') || 
+                                   getTexto('h1.fontHeadlineLarge') || 
+                                   getTexto('h1');
+
+                // Filtrar "Links de acessibilidade" ou similares
+                if (nomeExtraido && (nomeExtraido.toLowerCase().includes('acessibilidade') || nomeExtraido.toLowerCase().includes('accessibility'))) {
+                    nomeExtraido = getTexto('[data-attrid="title"]') || getTexto('div[role="main"] h2');
+                }
 
                 if (!nomeExtraido || nomeExtraido.length < 3) {
                     nomeExtraido = document.title.replace(/ - Google (Maps|Search|Busca)/i, '')
@@ -109,33 +113,44 @@ app.post('/scrape', async (req, res) => {
                 // 2. Extrair Nota e Avaliações
                 let nota = null, avaliacoes = null, categoria = null;
 
-                // MAPS
-                const notaEl = document.querySelector('span[aria-hidden="true"]');
-                if (notaEl && notaEl.innerText.includes(',')) {
-                    const possivelNota = notaEl.innerText.replace(',', '.');
-                    if (!isNaN(parseFloat(possivelNota))) nota = possivelNota;
-                }
+                // SEARCH / KNOWLEDGE PANEL (Prioridade para os dados que o subagent achou)
+                const searchNota = getTexto('span.Aq14f') || getTexto('.TT9eCd') || getTexto('[data-attrid="rating"] span[aria-label^="Avaliação"]');
+                if (searchNota) nota = searchNota.replace(',', '.');
 
-                const avalEl = document.querySelector('button[jsaction*="pane.rating.moreReviews"]') || 
-                               document.querySelector('span[aria-label*="avaliações"]') ||
-                               document.querySelector('button[aria-label*="avaliações"]');
-                if (avalEl) {
-                    avaliacoes = (avalEl.getAttribute('aria-label') || avalEl.innerText).replace(/\D/g, '');
-                }
+                const searchAval = getTexto('[data-attrid="rating"] a span') || 
+                                   getTexto('.SJmY2b span') || 
+                                   getTexto('.hqS69 span') ||
+                                   getTexto('span[aria-label*="avaliações"]');
+                if (searchAval) avaliacoes = searchAval.replace(/\D/g, '');
 
-                const catEl = document.querySelector('button[jsaction*="category"]') || document.querySelector('.DkEaL');
-                if (catEl) categoria = catEl.innerText.trim();
+                const searchCat = getTexto('[data-attrid="subtitle"]') || 
+                                   getTexto('.Y6Y31') || 
+                                   getTexto('.E54Xyc') || 
+                                   getTexto('.iP6Xbe');
+                if (searchCat) categoria = searchCat.trim();
 
-                // SEARCH
+                // FALLBACK MAPS (Se os de Search falharem)
                 if (!nota) {
-                    const sNota = getTexto('span.Aq14f') || getTexto('.TT9eCd');
-                    if (sNota) nota = sNota.replace(',', '.');
+                    const notaEl = document.querySelector('span[aria-hidden="true"]');
+                    if (notaEl && notaEl.innerText.includes(',')) {
+                        const possivelNota = notaEl.innerText.replace(',', '.');
+                        if (!isNaN(parseFloat(possivelNota))) nota = possivelNota;
+                    }
                 }
+
                 if (!avaliacoes) {
-                    const sAval = getTexto('.SJmY2b span') || getTexto('.hqS69 span');
-                    if (sAval) avaliacoes = sAval.replace(/\D/g, '');
+                    const avalEl = document.querySelector('button[jsaction*="pane.rating.moreReviews"]') || 
+                                   document.querySelector('span[aria-label*="avaliações"]') ||
+                                   document.querySelector('button[aria-label*="avaliações"]');
+                    if (avalEl) {
+                        avaliacoes = (avalEl.getAttribute('aria-label') || avalEl.innerText).replace(/\D/g, '');
+                    }
                 }
-                if (!categoria) categoria = getTexto('.Y6Y31') || getTexto('.E54Xyc');
+
+                if (!categoria) {
+                    const catEl = document.querySelector('button[jsaction*="category"]') || document.querySelector('.DkEaL');
+                    if (catEl) categoria = catEl.innerText.trim();
+                }
 
                 return {
                     nome: nomeExtraido,
