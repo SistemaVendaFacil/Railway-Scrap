@@ -36,52 +36,74 @@ app.post('/scrape', async (req, res) => {
 
         const page = await browser.newPage();
         
-        // Simula uma tela real
-        await page.setViewport({ width: 1280, height: 800 });
-
-        // User-Agent de um Chrome moderno no Windows
+        // Simulação de comportamento mais humano
+        await page.setViewport({ width: 1366, height: 768 });
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
-        await page.setExtraHTTPHeaders({ 'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7' });
+        
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1',
+            'DNT': '1'
+        });
 
-        // Navega até a URL
-        console.log("Navegando...");
-        await page.goto(url, { waitUntil: 'load', timeout: 60000 });
+        console.log("Navegando até a URL...");
+        
+        // Vai para o Google principal primeiro para criar um "contexto" (opcional, mas às vezes ajuda)
+        // await page.goto('https://www.google.com.br', { waitUntil: 'networkidle2' });
+        
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
 
-        // Tenta clicar no botão de "Aceitar tudo" ou "Concordo" se aparecer a tela de cookies
+        // Verificação de CAPTCHA
+        const isCaptcha = await page.evaluate(() => {
+            return document.title.includes('Pardon') || 
+                   document.body.innerText.includes('unusual traffic') ||
+                   location.href.includes('/sorry/');
+        });
+
+        if (isCaptcha) {
+            console.error("BLOQUEIO DETECTADO: Captcha do Google exibido.");
+            await browser.close();
+            return res.json({ success: false, error: 'Google bloqueou o acesso (Captcha).', isBotBlocked: true });
+        }
+
+        // Tenta aceitar cookies se aparecer
         try {
-            await new Promise(r => setTimeout(r, 4000));
-            // Busca botões ou divs com papel de botão que tenham textos de aceitação
-            const acceptSelectors = ['button', 'div[role="button"]', 'span', 'a'];
-            const acceptTexts = /Aceitar tudo|Concordo|Concordar|Accept all|I agree|Concordo/i;
-            
-            const elements = await page.$$(acceptSelectors.join(','));
-            for (const el of elements) {
-                const text = await page.evaluate(node => node.innerText, el);
-                if (acceptTexts.test(text)) {
-                    console.log(`Botão de cookies encontrado: "${text}". Clicando...`);
-                    await el.click();
-                    await new Promise(r => setTimeout(r, 5000)); // Espera mais tempo para o redirect
+            const cookieTexts = /Aceitar tudo|Concordo|Agree|Accept all/i;
+            const buttons = await page.$$('button, div[role="button"]');
+            for (const btn of buttons) {
+                const text = await page.evaluate(el => el.innerText, btn);
+                if (cookieTexts.test(text)) {
+                    await btn.click();
+                    await new Promise(r => setTimeout(r, 3000));
                     break;
                 }
             }
-        } catch (e) {
-            console.log("Fluxo de cookies finalizado.");
-        }
+        } catch (e) {}
 
-        // Aguarda o título da página mudar de uma URL para um texto real (ou timeout)
-        let retriesTitle = 10;
-        while (retriesTitle > 0) {
-            const currentTitle = await page.title();
-            if (currentTitle && !currentTitle.startsWith('http') && !currentTitle.includes('google.com/search')) {
+        // Aguarda os dados aparecerem (Knowledge Panel ou Maps)
+        let foundData = false;
+        let retries = 15;
+        while (retries > 0 && !foundData) {
+            foundData = await page.evaluate(() => {
+                return !!(document.querySelector('[data-attrid="title"]') || 
+                          document.querySelector('h1.fontHeadlineLarge') ||
+                          document.querySelector('.LrzUbe') ||
+                          document.querySelector('span.Aq14f'));
+            });
+            if (!foundData) {
+                console.log(`Aguardando dados... (${retries})`);
+                await new Promise(r => setTimeout(r, 2000));
+                retries--;
+            } else {
                 break;
             }
-            console.log(`Aguardando título real... Atual: "${currentTitle}"`);
-            await new Promise(r => setTimeout(r, 1500));
-            retriesTitle--;
         }
 
-        console.log(`Página Final: "${await page.title()}" em ${await page.url()}`);
-        console.log("Extraindo dados...");
+        console.log(`Página Estável. Título: "${await page.title()}"`);
 
         const extrair = async () => {
             return await page.evaluate(() => {
@@ -90,70 +112,43 @@ app.post('/scrape', async (req, res) => {
                     return el ? el.innerText.trim() : null;
                 };
 
-                // 1. Extrair Nome
-                let nomeExtraido = getTexto('[data-attrid="title"]') || 
-                                   getTexto('h1.fontHeadlineLarge') || 
-                                   getTexto('h1');
+                // 1. Extrair Nome (Evitando textos de acessibilidade)
+                let nome = getTexto('[data-attrid="title"]') || 
+                           getTexto('h1.fontHeadlineLarge') || 
+                           getTexto('.LrzUbe') ||
+                           getTexto('h1');
 
-                // Filtrar "Links de acessibilidade" ou similares
-                if (nomeExtraido && (nomeExtraido.toLowerCase().includes('acessibilidade') || nomeExtraido.toLowerCase().includes('accessibility'))) {
-                    nomeExtraido = getTexto('[data-attrid="title"]') || getTexto('div[role="main"] h2');
+                if (nome && /acessibilidade|accessibility/i.test(nome)) {
+                    nome = document.title.replace(/ - Google (Maps|Search|Pesquisa)/i, '').trim();
                 }
 
-                if (!nomeExtraido || nomeExtraido.length < 3) {
-                    nomeExtraido = document.title.replace(/ - Google (Maps|Search|Busca)/i, '')
-                                                 .replace(/ – Google (Maps|Search|Busca)/i, '')
-                                                 .trim();
-                }
-
-                if (nomeExtraido && (nomeExtraido.startsWith('http') || nomeExtraido.includes('google.com'))) {
-                    nomeExtraido = null;
+                if (nome && (nome.startsWith('http') || nome.includes('google.com'))) {
+                    nome = null;
                 }
 
                 // 2. Extrair Nota e Avaliações
                 let nota = null, avaliacoes = null, categoria = null;
 
-                // SEARCH / KNOWLEDGE PANEL (Prioridade para os dados que o subagent achou)
-                const searchNota = getTexto('span.Aq14f') || getTexto('.TT9eCd') || getTexto('[data-attrid="rating"] span[aria-label^="Avaliação"]');
-                if (searchNota) nota = searchNota.replace(',', '.');
+                // Seletores unificados (Geral + Maps)
+                const sNota = getTexto('span.Aq14f') || 
+                               getTexto('.TT9eCd') || 
+                               getTexto('[aria-hidden="true"]');
+                if (sNota && sNota.includes(',')) nota = sNota.replace(',', '.');
 
-                const searchAval = getTexto('[data-attrid="rating"] a span') || 
-                                   getTexto('.SJmY2b span') || 
-                                   getTexto('.hqS69 span') ||
-                                   getTexto('span[aria-label*="avaliações"]');
-                if (searchAval) avaliacoes = searchAval.replace(/\D/g, '');
+                const sAval = getTexto('[data-attrid="rating"] a span') || 
+                               getTexto('.SJmY2b span') || 
+                               getTexto('button[jsaction*="reviews"]') ||
+                               getTexto('span[aria-label*="avaliações"]');
+                if (sAval) avaliacoes = sAval.replace(/\D/g, '');
 
-                const searchCat = getTexto('[data-attrid="subtitle"]') || 
-                                   getTexto('.Y6Y31') || 
-                                   getTexto('.E54Xyc') || 
-                                   getTexto('.iP6Xbe');
-                if (searchCat) categoria = searchCat.trim();
-
-                // FALLBACK MAPS (Se os de Search falharem)
-                if (!nota) {
-                    const notaEl = document.querySelector('span[aria-hidden="true"]');
-                    if (notaEl && notaEl.innerText.includes(',')) {
-                        const possivelNota = notaEl.innerText.replace(',', '.');
-                        if (!isNaN(parseFloat(possivelNota))) nota = possivelNota;
-                    }
-                }
-
-                if (!avaliacoes) {
-                    const avalEl = document.querySelector('button[jsaction*="pane.rating.moreReviews"]') || 
-                                   document.querySelector('span[aria-label*="avaliações"]') ||
-                                   document.querySelector('button[aria-label*="avaliações"]');
-                    if (avalEl) {
-                        avaliacoes = (avalEl.getAttribute('aria-label') || avalEl.innerText).replace(/\D/g, '');
-                    }
-                }
-
-                if (!categoria) {
-                    const catEl = document.querySelector('button[jsaction*="category"]') || document.querySelector('.DkEaL');
-                    if (catEl) categoria = catEl.innerText.trim();
-                }
+                const sCat = getTexto('[data-attrid="subtitle"]') || 
+                              getTexto('.Y6Y31') || 
+                              getTexto('.DkEaL') ||
+                              getTexto('button[jsaction*="category"]');
+                if (sCat) categoria = sCat.trim();
 
                 return {
-                    nome: nomeExtraido,
+                    nome: nome,
                     nota: nota ? parseFloat(nota) : null,
                     avaliacoes: avaliacoes ? parseInt(avaliacoes, 10) : null,
                     categoria: categoria
@@ -161,16 +156,11 @@ app.post('/scrape', async (req, res) => {
             });
         };
 
-        let result = await extrair();
-
-        // Se falhou (veio null), tenta esperar mais 3 segundos e extrair de novo
-        if (!result.nome && !result.nota) {
-            console.log("Extração falhou inicialmente. Tentando retry em 4s...");
-            await new Promise(r => setTimeout(r, 4000));
-            result = await extrair();
-        }
+        const result = await extrair();
+        console.log("Resultado final:", result);
 
         res.json({ success: true, data: result });
+
 
     } catch (error) {
         console.error("Erro no scraping:", error);
