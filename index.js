@@ -48,27 +48,37 @@ app.post('/scrape', async (req, res) => {
 
         // Tenta clicar no botão de "Aceitar tudo" ou "Concordo" se aparecer a tela de cookies
         try {
-            // Aguarda um pouco para ver se a tela de cookies surge
-            await new Promise(r => setTimeout(r, 2000));
-            const buttons = await page.$$('button');
-            for (const btn of buttons) {
-                const text = await page.evaluate(el => el.innerText, btn);
-                if (/Aceitar tudo|Concordo|Concordar|Accept all|I agree/i.test(text)) {
-                    console.log("Clicando em Aceitar Cookies...");
-                    await btn.click();
-                    await new Promise(r => setTimeout(r, 3000));
+            await new Promise(r => setTimeout(r, 3000));
+            // Busca botões ou divs com papel de botão que tenham textos de aceitação
+            const acceptSelectors = [
+                'button', 
+                'div[role="button"]', 
+                'span',
+                'a'
+            ];
+            
+            const acceptTexts = /Aceitar tudo|Concordo|Concordar|Accept all|I agree/i;
+            
+            const elements = await page.$$(acceptSelectors.join(','));
+            for (const el of elements) {
+                const text = await page.evaluate(node => node.innerText, el);
+                if (acceptTexts.test(text)) {
+                    console.log(`Botão de cookies encontrado: "${text}". Clicando...`);
+                    await el.click();
+                    await new Promise(r => setTimeout(r, 4000)); // Espera o sumiço da tela
                     break;
                 }
             }
         } catch (e) {
-            console.log("Sem tela de cookies.");
+            console.log("Fluxo de cookies finalizado ou não necessário.");
         }
 
-        // Aguarda o seletor principal do Maps ou do Search
-        await Promise.race([
-            page.waitForSelector('h1', { timeout: 10000 }),
-            page.waitForSelector('[data-attrid="title"]', { timeout: 10000 })
-        ]).catch(() => console.log("Timeout aguardando seletores, tentando extrair assim mesmo..."));
+        // Aguarda estabilidade
+        await new Promise(r => setTimeout(r, 2000));
+        
+        const pageTitle = await page.title();
+        const pageUrl = await page.url();
+        console.log(`Página Final: "${pageTitle}" em ${pageUrl}`);
 
         console.log("Extraindo dados do DOM...");
 
@@ -78,17 +88,22 @@ app.post('/scrape', async (req, res) => {
                 return el ? el.innerText.trim() : null;
             };
 
-            // 1. Extrair Nome - PRIORIDADE MÁXIMA
-            let nomeLoja = getTexto('h1.fontHeadlineLarge') || 
-                           getTexto('h1') || 
-                           getTexto('[data-attrid="title"]') || 
-                           getTexto('div[role="main"] h2');
+            // 1. Extrair Nome
+            let nomeExtraido = getTexto('h1.fontHeadlineLarge') || 
+                               getTexto('h1') || 
+                               getTexto('[data-attrid="title"]') || 
+                               getTexto('div[role="main"] h2');
 
-            // Se ainda não tem nome, tenta pegar do título da aba (limpando o sufixo do Google)
-            if (!nomeLoja || nomeLoja.length < 3) {
-                nomeLoja = document.title.replace(/ - Google (Maps|Search|Busca)/i, '')
-                                         .replace(/ – Google (Maps|Search|Busca)/i, '')
-                                         .trim();
+            // Fallback para o título da página
+            if (!nomeExtraido || nomeExtraido.length < 3) {
+                nomeExtraido = document.title.replace(/ - Google (Maps|Search|Busca)/i, '')
+                                             .replace(/ – Google (Maps|Search|Busca)/i, '')
+                                             .trim();
+            }
+
+            // SEGURANÇA: Se o nome for uma URL (devido a redirecionamentos falhos), ignore-o
+            if (nomeExtraido.startsWith('http') || nomeExtraido.includes('google.com')) {
+                nomeExtraido = null;
             }
 
             // 2. Extrair Nota e Avaliações
@@ -105,14 +120,16 @@ app.post('/scrape', async (req, res) => {
 
             const avalEl = document.querySelector('button[jsaction*="pane.rating.moreReviews"]') || 
                            document.querySelector('span[aria-label*="avaliações"]') ||
-                           document.querySelector('span[aria-label*="reviews"]');
+                           document.querySelector('span[aria-label*="reviews"]') ||
+                           document.querySelector('button[aria-label*="avaliações"]');
             
             if (avalEl) {
                 const txt = (avalEl.getAttribute('aria-label') || avalEl.innerText).replace(/\D/g, '');
                 if (txt) avaliacoes = txt;
             }
 
-            const catEl = document.querySelector('button[jsaction*="category"]') || 
+            const catButtons = Array.from(document.querySelectorAll('button[jsaction*="category"]'));
+            const catEl = catButtons.length > 0 ? catButtons[0] : 
                            document.querySelector('.DkEaL') ||
                            document.querySelector('.fontBodyMedium span');
             if (catEl) {
@@ -125,14 +142,14 @@ app.post('/scrape', async (req, res) => {
                 if (searchNota) nota = searchNota.replace(',', '.');
             }
             if (!avaliacoes) {
-                const searchAval = getTexto('.SJmY2b span') || getTexto('.z1asCe + span');
+                const searchAval = getTexto('.SJmY2b span') || getTexto('.z1asCe + span') || getTexto('.hqS69 span');
                 if (searchAval) avaliacoes = searchAval.replace(/\D/g, '');
             }
             if (!categoria) {
-                categoria = getTexto('.Y6Y31') || getTexto('.E54Xyc');
+                categoria = getTexto('.Y6Y31') || getTexto('.E54Xyc') || getTexto('.iP6Xbe');
             }
 
-            // 4. Fallback agressivo por Regex se nada acima funcionou
+            // 4. Fallback agressivo por Regex no texto do body (último recurso)
             if (!nota || !avaliacoes) {
                 const bodyText = document.body.innerText;
                 const matchNota = bodyText.match(/(\d[.,]\d)\s?estrelas/i);
@@ -143,7 +160,7 @@ app.post('/scrape', async (req, res) => {
             }
 
             return {
-                nome: nomeLoja,
+                nome: nomeExtraido,
                 nota: nota ? parseFloat(nota) : null,
                 avaliacoes: avaliacoes ? parseInt(avaliacoes, 10) : null,
                 categoria: categoria
