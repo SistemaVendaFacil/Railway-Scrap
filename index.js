@@ -48,16 +48,10 @@ app.post('/scrape', async (req, res) => {
 
         // Tenta clicar no botão de "Aceitar tudo" ou "Concordo" se aparecer a tela de cookies
         try {
-            await new Promise(r => setTimeout(r, 3000));
+            await new Promise(r => setTimeout(r, 4000));
             // Busca botões ou divs com papel de botão que tenham textos de aceitação
-            const acceptSelectors = [
-                'button', 
-                'div[role="button"]', 
-                'span',
-                'a'
-            ];
-            
-            const acceptTexts = /Aceitar tudo|Concordo|Concordar|Accept all|I agree/i;
+            const acceptSelectors = ['button', 'div[role="button"]', 'span', 'a'];
+            const acceptTexts = /Aceitar tudo|Concordo|Concordar|Accept all|I agree|Concordo/i;
             
             const elements = await page.$$(acceptSelectors.join(','));
             for (const el of elements) {
@@ -65,111 +59,103 @@ app.post('/scrape', async (req, res) => {
                 if (acceptTexts.test(text)) {
                     console.log(`Botão de cookies encontrado: "${text}". Clicando...`);
                     await el.click();
-                    await new Promise(r => setTimeout(r, 4000)); // Espera o sumiço da tela
+                    await new Promise(r => setTimeout(r, 5000)); // Espera mais tempo para o redirect
                     break;
                 }
             }
         } catch (e) {
-            console.log("Fluxo de cookies finalizado ou não necessário.");
+            console.log("Fluxo de cookies finalizado.");
         }
 
-        // Aguarda estabilidade
-        await new Promise(r => setTimeout(r, 2000));
-        
-        const pageTitle = await page.title();
-        const pageUrl = await page.url();
-        console.log(`Página Final: "${pageTitle}" em ${pageUrl}`);
-
-        console.log("Extraindo dados do DOM...");
-
-        const dadosExtraidos = await page.evaluate(() => {
-            const getTexto = (sel) => {
-                const el = document.querySelector(sel);
-                return el ? el.innerText.trim() : null;
-            };
-
-            // 1. Extrair Nome
-            let nomeExtraido = getTexto('h1.fontHeadlineLarge') || 
-                               getTexto('h1') || 
-                               getTexto('[data-attrid="title"]') || 
-                               getTexto('div[role="main"] h2');
-
-            // Fallback para o título da página
-            if (!nomeExtraido || nomeExtraido.length < 3) {
-                nomeExtraido = document.title.replace(/ - Google (Maps|Search|Busca)/i, '')
-                                             .replace(/ – Google (Maps|Search|Busca)/i, '')
-                                             .trim();
+        // Aguarda o título da página mudar de uma URL para um texto real (ou timeout)
+        let retriesTitle = 10;
+        while (retriesTitle > 0) {
+            const currentTitle = await page.title();
+            if (currentTitle && !currentTitle.startsWith('http') && !currentTitle.includes('google.com/search')) {
+                break;
             }
+            console.log(`Aguardando título real... Atual: "${currentTitle}"`);
+            await new Promise(r => setTimeout(r, 1500));
+            retriesTitle--;
+        }
 
-            // SEGURANÇA: Se o nome for uma URL (devido a redirecionamentos falhos), ignore-o
-            if (nomeExtraido.startsWith('http') || nomeExtraido.includes('google.com')) {
-                nomeExtraido = null;
-            }
+        console.log(`Página Final: "${await page.title()}" em ${await page.url()}`);
+        console.log("Extraindo dados...");
 
-            // 2. Extrair Nota e Avaliações
-            let nota = null;
-            let avaliacoes = null;
-            let categoria = null;
+        const extrair = async () => {
+            return await page.evaluate(() => {
+                const getTexto = (sel) => {
+                    const el = document.querySelector(sel);
+                    return el ? el.innerText.trim() : null;
+                };
 
-            // --- Estrutura GOOGLE MAPS ---
-            const notaEl = document.querySelector('span[aria-hidden="true"]');
-            if (notaEl && notaEl.innerText.includes(',')) {
-                const possivelNota = notaEl.innerText.replace(',', '.');
-                if (!isNaN(parseFloat(possivelNota))) nota = possivelNota;
-            }
+                // 1. Extrair Nome
+                let nomeExtraido = getTexto('h1.fontHeadlineLarge') || 
+                                   getTexto('h1') || 
+                                   getTexto('[data-attrid="title"]') || 
+                                   getTexto('div[role="main"] h2');
 
-            const avalEl = document.querySelector('button[jsaction*="pane.rating.moreReviews"]') || 
-                           document.querySelector('span[aria-label*="avaliações"]') ||
-                           document.querySelector('span[aria-label*="reviews"]') ||
-                           document.querySelector('button[aria-label*="avaliações"]');
-            
-            if (avalEl) {
-                const txt = (avalEl.getAttribute('aria-label') || avalEl.innerText).replace(/\D/g, '');
-                if (txt) avaliacoes = txt;
-            }
+                if (!nomeExtraido || nomeExtraido.length < 3) {
+                    nomeExtraido = document.title.replace(/ - Google (Maps|Search|Busca)/i, '')
+                                                 .replace(/ – Google (Maps|Search|Busca)/i, '')
+                                                 .trim();
+                }
 
-            const catButtons = Array.from(document.querySelectorAll('button[jsaction*="category"]'));
-            const catEl = catButtons.length > 0 ? catButtons[0] : 
-                           document.querySelector('.DkEaL') ||
-                           document.querySelector('.fontBodyMedium span');
-            if (catEl) {
-                categoria = catEl.innerText.trim();
-            }
+                if (nomeExtraido && (nomeExtraido.startsWith('http') || nomeExtraido.includes('google.com'))) {
+                    nomeExtraido = null;
+                }
 
-            // --- Estrutura GOOGLE SEARCH (Knowledge Panel) ---
-            if (!nota || isNaN(nota)) {
-                const searchNota = getTexto('span.Aq14f') || getTexto('.TT9eCd');
-                if (searchNota) nota = searchNota.replace(',', '.');
-            }
-            if (!avaliacoes) {
-                const searchAval = getTexto('.SJmY2b span') || getTexto('.z1asCe + span') || getTexto('.hqS69 span');
-                if (searchAval) avaliacoes = searchAval.replace(/\D/g, '');
-            }
-            if (!categoria) {
-                categoria = getTexto('.Y6Y31') || getTexto('.E54Xyc') || getTexto('.iP6Xbe');
-            }
+                // 2. Extrair Nota e Avaliações
+                let nota = null, avaliacoes = null, categoria = null;
 
-            // 4. Fallback agressivo por Regex no texto do body (último recurso)
-            if (!nota || !avaliacoes) {
-                const bodyText = document.body.innerText;
-                const matchNota = bodyText.match(/(\d[.,]\d)\s?estrelas/i);
-                if (matchNota && !nota) nota = matchNota[1].replace(',', '.');
+                // MAPS
+                const notaEl = document.querySelector('span[aria-hidden="true"]');
+                if (notaEl && notaEl.innerText.includes(',')) {
+                    const possivelNota = notaEl.innerText.replace(',', '.');
+                    if (!isNaN(parseFloat(possivelNota))) nota = possivelNota;
+                }
 
-                const matchAval = bodyText.match(/([\d.]+)\s?avalia/i);
-                if (matchAval && !avaliacoes) avaliacoes = matchAval[1].replace(/\D/g, '');
-            }
+                const avalEl = document.querySelector('button[jsaction*="pane.rating.moreReviews"]') || 
+                               document.querySelector('span[aria-label*="avaliações"]') ||
+                               document.querySelector('button[aria-label*="avaliações"]');
+                if (avalEl) {
+                    avaliacoes = (avalEl.getAttribute('aria-label') || avalEl.innerText).replace(/\D/g, '');
+                }
 
-            return {
-                nome: nomeExtraido,
-                nota: nota ? parseFloat(nota) : null,
-                avaliacoes: avaliacoes ? parseInt(avaliacoes, 10) : null,
-                categoria: categoria
-            };
-        });
+                const catEl = document.querySelector('button[jsaction*="category"]') || document.querySelector('.DkEaL');
+                if (catEl) categoria = catEl.innerText.trim();
 
-        console.log("Extração concluída:", dadosExtraidos);
+                // SEARCH
+                if (!nota) {
+                    const sNota = getTexto('span.Aq14f') || getTexto('.TT9eCd');
+                    if (sNota) nota = sNota.replace(',', '.');
+                }
+                if (!avaliacoes) {
+                    const sAval = getTexto('.SJmY2b span') || getTexto('.hqS69 span');
+                    if (sAval) avaliacoes = sAval.replace(/\D/g, '');
+                }
+                if (!categoria) categoria = getTexto('.Y6Y31') || getTexto('.E54Xyc');
 
-        res.json({ success: true, data: dadosExtraidos });
+                return {
+                    nome: nomeExtraido,
+                    nota: nota ? parseFloat(nota) : null,
+                    avaliacoes: avaliacoes ? parseInt(avaliacoes, 10) : null,
+                    categoria: categoria
+                };
+            });
+        };
+
+        let result = await extrair();
+
+        // Se falhou (veio null), tenta esperar mais 3 segundos e extrair de novo
+        if (!result.nome && !result.nota) {
+            console.log("Extração falhou inicialmente. Tentando retry em 4s...");
+            await new Promise(r => setTimeout(r, 4000));
+            result = await extrair();
+        }
+
+        res.json({ success: true, data: result });
+
     } catch (error) {
         console.error("Erro no scraping:", error);
         res.status(500).json({ error: 'Erro ao extrair informações da página.', detalhe: error.message });
