@@ -51,22 +51,20 @@ app.post('/scrape', async (req, res) => {
 
         console.log("Navegando... (Modo Mobile)");
         
-        // Esperamos apenas o DOM carregar (menos barulhento que networkidle2)
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+        // Esperamos um pouco mais para garantir que o redirecionamento e o JS rodaram
+        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+        
+        // Aguarda um pouco extra para o dinamismo do Google
+        await new Promise(r => setTimeout(r, 5000));
 
-        // Verificação rápida de Bloqueio
-        const pageContent = await page.content();
-        if (pageContent.includes('unusual traffic') || pageContent.includes('/sorry/')) {
-            console.error("BLOQUEIO PERSISTENTE: O IP do Railway continua barrado pelo Google.");
-            return res.json({ 
-                success: false, 
-                error: 'IP do Servidor Bloqueado pelo Google (Captcha).', 
-                blockedIp: true 
-            });
+        // Verificação de Bloqueio / Conteúdo Vazio
+        const bodyHandle = await page.$('body');
+        const bodyText = await page.evaluate(el => el.innerText, bodyHandle);
+        
+        if (bodyText.includes('unusual traffic') || bodyText.includes('/sorry/')) {
+            console.error("BLOQUEIO: Captcha detectado.");
+            return res.json({ success: false, error: 'IP Bloqueado (Captcha).' });
         }
-
-        // Aguarda um pouco para o JS do Google rodar no mobile
-        await new Promise(r => setTimeout(r, 4000));
 
         const extrair = async () => {
             return await page.evaluate(() => {
@@ -75,51 +73,60 @@ app.post('/scrape', async (req, res) => {
                     return el ? el.innerText.trim() : null;
                 };
 
-                // --- SELETORES MOBILE GOOGLE SEARCH ---
-                // Nome: div de heading nível 2 é o mais estável
+                // Busca Nome (Vários padrões Mobile)
                 let nome = getTexto('div[role="heading"][aria-level="2"]') || 
                            getTexto('h1') ||
-                           getTexto('[data-attrid="title"]');
+                           getTexto('[data-attrid="title"]') ||
+                           getTexto('.qrShbc div') ||
+                           getTexto('.vk_bk'); // Nome em alguns layouts mobile
 
-                // Nota: classe Aq14f é padrão no mobile
-                let nota = getTexto('span.Aq14f') || getTexto('.p_z89_nota');
-                
-                // Avaliações: span hq99nb ou aria-label
+                // Nota
+                let nota = getTexto('span.Aq14f') || 
+                           getTexto('.p_z89_nota') || 
+                           getTexto('.v7vB6e') || // Outro padrão mobile
+                           getTexto('.h1B8Eb');
+
+                // Avaliações
                 let avaliacoes = getTexto('span.hq99nb') || 
-                                 getTexto('span[aria-label*="avaliações"]');
-                
-                // Categoria: Bloco de texto após a nota
-                let categoria = getTexto('div.BNeawe.tAd7Pd.AP7Wnd') || 
-                                getTexto('[data-attrid="subtitle"]');
+                                 getTexto('span[aria-label*="avaliações"]') ||
+                                 getTexto('.z1asCe + span') ||
+                                 getTexto('.R9S7He');
 
-                // --- FALLBACKS ---
-                if (nome && /acessibilidade|accessibility|google/i.test(nome)) nome = null;
-                if (nota && nota.includes(',')) nota = nota.replace(',', '.');
-                if (avaliacoes) avaliacoes = avaliacoes.replace(/\D/g, '');
+                // Categoria
+                let categoria = getTexto('div.BNeawe.tAd7Pd.AP7Wnd') || 
+                                getTexto('[data-attrid="subtitle"]') ||
+                                getTexto('.E54Xyc');
 
                 return {
-                    nome: nome,
-                    nota: nota ? parseFloat(nota) : null,
-                    avaliacoes: avaliacoes ? parseInt(avaliacoes, 10) : null,
-                    categoria: categoria
+                    nome,
+                    nota: nota ? nota.replace(',', '.') : null,
+                    avaliacoes: avaliacoes ? avaliacoes.replace(/\D/g, '') : null,
+                    categoria
                 };
             });
         };
 
         const result = await extrair();
         
-        // SEGURANÇA FINAL: Se o nome falhou ou veio URL, tenta o título da aba se for limpo
-        if (!result.nome || result.nome.startsWith('http')) {
-            const title = await page.title();
-            if (title && !title.startsWith('http')) {
-                result.nome = title.replace(/ - Google (Busca|Search|Maps|Pesquisa)/i, '').trim();
-            } else {
-                result.nome = null; // Antes nulo que URL
+        // Tratamento de tipos
+        if (result.nota) result.nota = parseFloat(result.nota);
+        if (result.avaliacoes) result.avaliacoes = parseInt(result.avaliacoes, 10);
+
+        // Se falhou gravemente, logamos o que o robô está vendo para depurar
+        if (!result.nome && !result.nota) {
+            const pageTitle = await page.title();
+            const bodySnippet = bodyText.substring(0, 500).replace(/\n/g, ' ');
+            console.log(`FALHA EXTRAÇÃO! Título: "${pageTitle}" | Snippet: ${bodySnippet}...`);
+            
+            // Tenta pegar o nome pelo título como última chance
+            if (pageTitle && !pageTitle.startsWith('http')) {
+                result.nome = pageTitle.replace(/ - Google (Busca|Search|Maps|Pesquisa)/i, '').trim();
             }
         }
 
         console.log("Resultado final (Mobile):", result);
         res.json({ success: true, data: result });
+
 
 
 
