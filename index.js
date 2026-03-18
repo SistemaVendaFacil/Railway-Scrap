@@ -47,46 +47,56 @@ app.post('/scrape', async (req, res) => {
         console.log("Página carregada, extraindo dados...");
 
         const dadosExtraidos = await page.evaluate(() => {
-            let nomeStr = null;
-            let notaStr = null;
-            let avaliacoesStr = null;
-            let categoriaStr = null;
+            const getTexto = (sel) => {
+                const el = document.querySelector(sel);
+                return el ? el.innerText.trim() : null;
+            };
 
-            // Extrair Nome (geralmente num h1 em páginas de mapa/busca)
-            const h1 = document.querySelector('h1');
-            if (h1) nomeStr = h1.innerText.trim();
+            // 1. Extrair Nome
+            let nome = getTexto('h1.fontHeadlineLarge') || getTexto('h1') || document.title.replace(' - Google Maps', '');
 
-            // Pega o texto completo da tela para procurar o padrão de avaliação em pt-BR
-            const textoCompleto = document.body.innerText || "";
-            
-            // Regex ajustada: Pega a nota (ex: 4,8), e as avaliações (ex: 34)
-            const regexAvaliacao = /(\d[.,]\d)[^\d]{1,10}?(\d+([.,]\d+)*)[^\d]{1,10}?(avalia|coment)/i;
-            const match = textoCompleto.match(regexAvaliacao);
-            
-            if (match) {
-                notaStr = match[1].replace(',', '.');
-                avaliacoesStr = match[2].replace(/[.,]/g, ''); // Limpa os pontos (1.500 -> 1500)
+            // 2. Extrair Nota e Avaliações (Método Visual/DOM primeiro)
+            let nota = null;
+            let avaliacoes = null;
+            let categoria = null;
+
+            // Busca a nota em spans de estrelas (ex: "4,8")
+            const notaEl = document.querySelector('span[aria-hidden="true"]');
+            if (notaEl && notaEl.innerText.includes(',')) {
+                nota = notaEl.innerText.replace(',', '.');
             }
 
-            // Tenta pegar alguma categoria/setor perto do nome ou da nota (Padrão Google Maps: "Pizzaria", "Restaurante", etc)
-            // Em páginas do Maps completas, a categoria é um botão após as avaliações.
-            const botoes = Array.from(document.querySelectorAll('button'));
-            for(let btn of botoes) {
-                 if(btn.innerText && btn.innerText.length > 3 && btn.innerText.length < 30) {
-                     // Lógica muito simples para tentar adivinhar a categoria, o ideal é refinar com o CSS real do Google que mudar toda hora
-                     let classname = btn.className.toLowerCase();
-                     if(classname.includes('category') || btn.getAttribute('aria-label')?.toLowerCase().includes('categoria')) {
-                         categoriaStr = btn.innerText;
-                         break;
-                     }
-                 }
+            // Busca avaliações (ex: "(1.592)" ou "1.592 avaliações")
+            const avalEl = document.querySelector('button[jsaction="pane.rating.moreReviews"] span') || 
+                           document.querySelector('span[aria-label*="avaliações"]');
+            if (avalEl) {
+                avaliacoes = avalEl.innerText.replace(/\D/g, '');
+            }
+
+            // 3. Extrair Categoria (Setor)
+            // Geralmente é um botão próximo à nota
+            const catEl = document.querySelector('button[jsaction*="category"]') || 
+                           document.querySelector('.DkEaL'); // Classe comum para categoria no Maps
+            if (catEl) {
+                categoria = catEl.innerText.trim();
+            }
+
+            // 4. Fallback para Texto Puro se a estrutura falhar
+            const textoBody = document.body.innerText;
+            if (!nota || !avaliacoes) {
+                const regex = /(\d[.,]\d)[^\d]{1,10}?(\d+([.,]\d+)*)[^\d]{1,10}?(avalia|coment)/i;
+                const match = textoBody.match(regex);
+                if (match) {
+                    if (!nota) nota = match[1].replace(',', '.');
+                    if (!avaliacoes) avaliacoes = match[2].replace(/\D/g, '');
+                }
             }
 
             return {
-                nome: nomeStr,
-                nota: notaStr ? parseFloat(notaStr) : null,
-                avaliacoes: avaliacoesStr ? parseInt(avaliacoesStr, 10) : null,
-                categoria: categoriaStr
+                nome: nome,
+                nota: nota ? parseFloat(nota) : null,
+                avaliacoes: avaliacoes ? parseInt(avaliacoes, 10) : null,
+                categoria: categoria
             };
         });
 
