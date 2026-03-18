@@ -36,74 +36,37 @@ app.post('/scrape', async (req, res) => {
 
         const page = await browser.newPage();
         
-        // Simulação de comportamento mais humano
-        await page.setViewport({ width: 1366, height: 768 });
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+        // --- BYPASS DE IDENTIDADE: DISFARCE MOBILE (iPhone) ---
+        // Muitos bloqueios de Data Center (Railway) são menos agressivos com dispositivos móveis
+        await page.setViewport({ width: 390, height: 844, isMobile: true, hasTouch: true });
+        await page.setUserAgent('Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1');
         
         await page.setExtraHTTPHeaders({
-            'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Language': 'pt-BR,pt;q=0.9',
             'Upgrade-Insecure-Requests': '1',
             'Sec-Fetch-Dest': 'document',
             'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1',
-            'DNT': '1'
+            'Sec-Fetch-Site': 'none'
         });
 
-        console.log("Navegando até a URL...");
+        console.log("Navegando... (Modo Mobile)");
         
-        // Vai para o Google principal primeiro para criar um "contexto" (opcional, mas às vezes ajuda)
-        // await page.goto('https://www.google.com.br', { waitUntil: 'networkidle2' });
-        
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+        // Esperamos apenas o DOM carregar (menos barulhento que networkidle2)
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
-        // Verificação de CAPTCHA
-        const isCaptcha = await page.evaluate(() => {
-            return document.title.includes('Pardon') || 
-                   document.body.innerText.includes('unusual traffic') ||
-                   location.href.includes('/sorry/');
-        });
-
-        if (isCaptcha) {
-            console.error("BLOQUEIO DETECTADO: Captcha do Google exibido.");
-            await browser.close();
-            return res.json({ success: false, error: 'Google bloqueou o acesso (Captcha).', isBotBlocked: true });
-        }
-
-        // Tenta aceitar cookies se aparecer
-        try {
-            const cookieTexts = /Aceitar tudo|Concordo|Agree|Accept all/i;
-            const buttons = await page.$$('button, div[role="button"]');
-            for (const btn of buttons) {
-                const text = await page.evaluate(el => el.innerText, btn);
-                if (cookieTexts.test(text)) {
-                    await btn.click();
-                    await new Promise(r => setTimeout(r, 3000));
-                    break;
-                }
-            }
-        } catch (e) {}
-
-        // Aguarda os dados aparecerem (Knowledge Panel ou Maps)
-        let foundData = false;
-        let retries = 15;
-        while (retries > 0 && !foundData) {
-            foundData = await page.evaluate(() => {
-                return !!(document.querySelector('[data-attrid="title"]') || 
-                          document.querySelector('h1.fontHeadlineLarge') ||
-                          document.querySelector('.LrzUbe') ||
-                          document.querySelector('span.Aq14f'));
+        // Verificação rápida de Bloqueio
+        const pageContent = await page.content();
+        if (pageContent.includes('unusual traffic') || pageContent.includes('/sorry/')) {
+            console.error("BLOQUEIO PERSISTENTE: O IP do Railway continua barrado pelo Google.");
+            return res.json({ 
+                success: false, 
+                error: 'IP do Servidor Bloqueado pelo Google (Captcha).', 
+                blockedIp: true 
             });
-            if (!foundData) {
-                console.log(`Aguardando dados... (${retries})`);
-                await new Promise(r => setTimeout(r, 2000));
-                retries--;
-            } else {
-                break;
-            }
         }
 
-        console.log(`Página Estável. Título: "${await page.title()}"`);
+        // Aguarda um pouco para o JS do Google rodar no mobile
+        await new Promise(r => setTimeout(r, 4000));
 
         const extrair = async () => {
             return await page.evaluate(() => {
@@ -112,40 +75,28 @@ app.post('/scrape', async (req, res) => {
                     return el ? el.innerText.trim() : null;
                 };
 
-                // 1. Extrair Nome (Evitando textos de acessibilidade)
-                let nome = getTexto('[data-attrid="title"]') || 
-                           getTexto('h1.fontHeadlineLarge') || 
-                           getTexto('.LrzUbe') ||
-                           getTexto('h1');
+                // No mobile, os seletores podem mudar um pouco
+                let nome = getTexto('div[role="heading"]') || 
+                           getTexto('h1') ||
+                           getTexto('[data-attrid="title"]') ||
+                           getTexto('.LrzUbe');
 
-                if (nome && /acessibilidade|accessibility/i.test(nome)) {
-                    nome = document.title.replace(/ - Google (Maps|Search|Pesquisa)/i, '').trim();
-                }
-
-                if (nome && (nome.startsWith('http') || nome.includes('google.com'))) {
+                // Evitar nome de sistema
+                if (nome && /acessibilidade|accessibility|google/i.test(nome)) {
                     nome = null;
                 }
 
-                // 2. Extrair Nota e Avaliações
                 let nota = null, avaliacoes = null, categoria = null;
 
-                // Seletores unificados (Geral + Maps)
-                const sNota = getTexto('span.Aq14f') || 
-                               getTexto('.TT9eCd') || 
-                               getTexto('[aria-hidden="true"]');
-                if (sNota && sNota.includes(',')) nota = sNota.replace(',', '.');
+                // Seletores Mobile do Google Search
+                const sNota = getTexto('span.Aq14f') || getTexto('.p_z89_nota') || getTexto('.t0271b');
+                if (sNota) nota = sNota.replace(',', '.');
 
-                const sAval = getTexto('[data-attrid="rating"] a span') || 
-                               getTexto('.SJmY2b span') || 
-                               getTexto('button[jsaction*="reviews"]') ||
-                               getTexto('span[aria-label*="avaliações"]');
+                const sAval = getTexto('span[aria-label*="avaliações"]') || getTexto('.z1asCe + span');
                 if (sAval) avaliacoes = sAval.replace(/\D/g, '');
 
-                const sCat = getTexto('[data-attrid="subtitle"]') || 
-                              getTexto('.Y6Y31') || 
-                              getTexto('.DkEaL') ||
-                              getTexto('button[jsaction*="category"]');
-                if (sCat) categoria = sCat.trim();
+                const sCat = getTexto('[data-attrid="subtitle"]') || getTexto('.E54Xyc');
+                if (sCat) categoria = sCat;
 
                 return {
                     nome: nome,
@@ -157,9 +108,16 @@ app.post('/scrape', async (req, res) => {
         };
 
         const result = await extrair();
-        console.log("Resultado final:", result);
+        
+        // Se ainda estiver nulo, tenta um último recurso: pegar do título da página
+        if (!result.nome) {
+            const title = await page.title();
+            result.nome = title.replace(/ - Google (Busca|Search|Maps)/i, '').trim();
+        }
 
+        console.log("Resultado final (Mobile):", result);
         res.json({ success: true, data: result });
+
 
 
     } catch (error) {
